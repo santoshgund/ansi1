@@ -1,0 +1,1090 @@
+# ASP.NET
+# Build and test ASP.NET projects.
+# Add steps that publish symbols, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/apps/aspnet/build-aspnet-4
+
+trigger:
+- integration
+
+stages:
+- stage: Dev_Deployment
+  displayName: Dev Deployment
+  pool:
+    name: Azure Pipelines
+    vmImage: 'vs2017-win2016'
+ 
+  jobs:
+  
+  - job: Provision_Azure_SQL
+    displayName: Provision Azure SQL DB
+ 
+    steps:
+      - task: TerraformInstaller@0
+        displayName: 'Install Terraform'
+        inputs:
+          terraformVersion: '0.14.7'
+      - task: Terraform@2
+        displayName: 'Terraform init'
+        inputs:
+          TemplatePath: 'Terraform/azuresqldb'
+          Arguments: 'init'
+          InstallTerraform: false
+          UseAzureSub: true
+          ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+          ConnectedServiceNameARM: 'WalttiProServiceConnection-All'
+          ManageState: true
+          SpecifyStorageAccount: true
+          StorageAccountResourceGroup: 'rg-terraform'
+          StorageAccountRM: 'walttiproterraform'
+          StorageContainerName: 'terraform'
+      - task: Terraform@2
+        displayName: 'Terraform validate'
+        inputs:
+          TemplatePath: 'Terraform/azuresqldb'
+          Arguments: 'validate'
+          InstallTerraform: false
+          UseAzureSub: false
+      - task: Terraform@2
+        displayName: 'Terraform plan'
+        inputs:
+          TemplatePath: 'Terraform/azuresqldb'
+          Arguments: 'plan'
+          InstallTerraform: false
+          UseAzureSub: true
+          ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+          ConnectedServiceNameARM: 'WalttiProServiceConnection-All'
+          ManageState: true
+          SpecifyStorageAccount: true
+          StorageAccountResourceGroup: 'rg-terraform'
+          StorageAccountRM: 'walttiproterraform'
+          StorageContainerName: 'terraform'
+      - task: TerraformCLI@0
+        displayName: 'Terraform apply'
+        inputs:
+          command: 'apply'
+          workingDirectory: 'Terraform/azuresqldb'
+          environmentServiceName: 'WalttiProServiceConnection-All'
+  
+  - job: Provision_VM
+    dependsOn: Provision_Azure_SQL
+    displayName: Provision VM
+    steps:
+      - task: TerraformInstaller@0
+        displayName: 'Install Terraform'
+        inputs:
+          terraformVersion: '0.14.7'
+
+      - task: Terraform@2
+        displayName: 'Terraform init'
+        inputs:
+          TemplatePath: 'Terraform'
+          Arguments: 'init'
+          InstallTerraform: false
+          UseAzureSub: true
+          ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+          ConnectedServiceNameARM: 'WalttiProServiceConnection-All'
+          ManageState: true
+          SpecifyStorageAccount: true
+          StorageAccountResourceGroup: 'rg-terraform'
+          StorageAccountRM: 'walttiproterraform'
+          StorageContainerName: 'terraform'
+
+      - task: Terraform@2
+        displayName: 'Terraform select workspace'
+        inputs:
+          TemplatePath: 'Terraform'
+          Arguments: 'workspace select dev'
+          InstallTerraform: false
+          UseAzureSub: true
+          ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+          ConnectedServiceNameARM: 'WalttiProServiceConnection-All'
+          ManageState: true
+          SpecifyStorageAccount: true
+          StorageAccountResourceGroup: 'rg-terraform'
+          StorageAccountRM: 'walttiproterraform'
+          StorageContainerName: 'terraform'
+
+      - task: Terraform@2
+        displayName: 'Terraform validate'
+        inputs:
+          TemplatePath: 'Terraform'
+          Arguments: 'validate'
+          InstallTerraform: false
+          UseAzureSub: false
+      - task: Terraform@2
+        displayName: 'Terraform plan'
+        inputs:
+          TemplatePath: 'Terraform'
+          Arguments: 'plan'
+          InstallTerraform: false
+          UseAzureSub: true
+          ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+          ConnectedServiceNameARM: 'WalttiProServiceConnection-All'
+          ManageState: true
+          SpecifyStorageAccount: true
+          StorageAccountResourceGroup: 'rg-terraform'
+          StorageAccountRM: 'walttiproterraform'
+          StorageContainerName: 'terraform'
+
+      - task: TerraformCLI@0
+        displayName: 'Terraform apply'
+        inputs:
+          command: 'apply'
+          workingDirectory: 'Terraform'
+          environmentServiceName: 'WalttiProServiceConnection-All'
+      - task: terraform-outputs@0
+        displayName: 'Terraform output'
+        inputs:
+          workingDirectory: 'Terraform'
+          mapSensitiveOutputsAsSecrets: false
+
+      - task: PowerShell@2
+        displayName: 'Output IP Address'
+        inputs:
+          targetType: Inline
+          script: |
+            Write-Host "$(public_ip_address)"
+
+      - task: Bash@3
+        displayName: 'Create variable for IP Address'
+        inputs:
+          targetType: 'inline'
+          script: |
+            IP_Address="$(public_ip_address)"
+            echo "$IP_Address"
+            mkdir -p $(Pipeline.Workspace)/variables
+            echo "$IP_Address" > $(Pipeline.Workspace)/variables/local
+          workingDirectory: '$(Pipeline.Workspace)'
+
+      - task: AzureCLI@2
+        displayName: 'Set SQL Server Firewall Rule'
+        inputs:
+          azureSubscription: 'WalttiProServiceConnection-All'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: 'az sql server firewall-rule create -g rg-dev-test-db -s walttipro -n env_dev_firewall_rule --start-ip-address "$(public_ip_address)" --end-ip-address "$(public_ip_address)"'
+     
+      - task: BatchScript@1
+        displayName: 'Deploy database artifacts'
+        inputs:
+          filename: 'Database/Deployment/AZURE-DEV.DBDeployment.bat'
+          workingFolder: Database/Deployment'
+
+      - task: PublishPipelineArtifact@1
+        displayName: 'Publish pipeline artifacts'
+        inputs:
+          targetPath: '$(Pipeline.Workspace)'
+          artifact: 'variables'
+          publishLocation: 'pipeline'
+
+  - job: Build_Applications
+    dependsOn: Provision_VM
+    displayName: Build Applications
+    
+    variables:
+    - name: Parameters.solution
+      value: '**/*.sln'
+    - name: BuildPlatform
+      value: 'Any CPU'
+    - name: BuildConfiguration
+      value: 'AzureDev'
+    - name: Parameters.ArtifactName
+      value: 'Drop'
+
+    steps:
+
+      - task: NodeTool@0
+        inputs:
+          versionSpec: '12.x'
+        displayName: 'Install Node.js'
+      
+      - task: Npm@1
+        displayName: 'Angular CLI installation '
+        inputs:
+          command: custom
+          workingDir: WalttiProUI
+          verbose: false
+          customCommand: 'install @angular/cli -g'
+      
+      - task: Cache@2
+        displayName: 'Cache npm packages'
+        inputs:
+          key: '**/package-lock.json, !**/node_modules/**/package-lock.json, !**/.*/**/package-lock.json'
+          path: 'WalttiProUI/node_modules'
+          cacheHitVar: 'CacheRestored'
+      - task: Npm@1
+        displayName: 'npm install'
+        inputs:
+          workingDir: WalttiProUI
+          verbose: false
+      # - task: SonarQubePrepare@4
+      #   displayName: 'Prepare SonarQube for WalttiPro UI application'
+      #   inputs:
+      #     SonarQube: 'SonarQube Service Connection'
+      #     scannerMode: 'CLI'
+      #     configMode: 'manual'
+      #     cliProjectKey: 'walttipro-ui'
+      #     cliProjectName: 'walttipro-ui'
+      #     cliSources: 'WalttiProUI'
+      #     extraProperties: |
+      #       # Additional properties that will be passed to the scanner, 
+      #       # Put one key=value per line, example:
+      #       # sonar.exclusions=**/*.bin
+      #       sonar.sourceEncoding=UTF-8
+      #       sonar.exclusions=**node_modules/**,**/*.spec.ts
+      #       # sonar.tests=src
+      #       # sonar.test.inclusions=**/*.spec.ts
+      #       sonar.ts.tslintconfigpath=tslint.json
+      #       sonar.typescript.Icov.reportPaths=$(Build.SourceDirectory)/WalttiProUI/coverage/Icov.info
+      #       sonar.typescript.exclusions=**/node_modules/**,**/typings.d.ts,**/main.ts
+
+      # - task: PowerShell@2
+      #   displayName: 'Set branch name variable for SonarQube'
+      #   inputs:
+      #     targetType: 'inline'
+      #     script: |
+      #       $params = "$env:SONARQUBE_SCANNER_PARAMS" -replace '"sonar.branch.name":"[\w,/,-]*"\,?'
+      #       Write-Host "##vso[task.setvariable variable=SONARQUBE_SCANNER_PARAMS]$params"
+      - task: Npm@1
+        displayName: 'Build UI application'
+        inputs:
+          command: custom
+          workingDir: WalttiProUI
+          verbose: false
+          customCommand: 'run build:AzureDev'
+
+      # - task: SonarQubeAnalyze@4
+      #   displayName: 'Run Code Analysis'
+      
+      # - task: SonarQubeAnalyze@4
+      #   displayName: 'Publish Quality Gate Result'
+
+      # - task: SonarQubePrepare@4
+      #   displayName: 'Prepare SonarQube analysis for WalltiPro Services'
+      #   inputs:
+      #     SonarQube: 'SonarQube Service Connection'
+      #     scannerMode: 'MSBuild'
+      #     projectKey: 'walttipro'
+      #     projectName: 'walttipro'
+      #     extraProperties: |
+      #       # Additional properties that will be passed to the scanner, 
+      #       # sonar.exclusions=**/*.bin
+      #       sonar.projectName=walttipro
+      #       sonar.projectKey=walttipro
+
+      # - task: PowerShell@2
+      #   displayName: 'Set branch name variable for SonarQube'
+      #   inputs:
+      #     targetType: 'inline'
+      #     script: |
+      #       $params = "$env:SONARQUBE_SCANNER_PARAMS" -replace '"sonar.branch.name":"[\w,/,-]*"\,?'
+      #       Write-Host "##vso[task.setvariable variable=SONARQUBE_SCANNER_PARAMS]$params"
+      - task: MSBuild@1
+        displayName: 'Build Services'
+        inputs:
+          solution: 'WalttiProServices/WalttiProServices.sln'
+          configuration: '$(BuildConfiguration)'
+          clean: true
+          restoreNugetPackages: true
+          logProjectEvents: true
+      
+      # - task: SonarQubeAnalyze@4
+      #   displayName: 'Run Code Analysis'
+      
+      # - task: SonarQubeAnalyze@4
+      #   displayName: 'Publish Quality Gate Result'
+      
+      - task: WhiteSource Bolt@20
+        inputs:
+          advance: true
+          exclude: '$(Build.SourcesDirectory)/Lib/Resharper'
+
+      - task: DeleteFiles@1
+        displayName: 'Delete pdb files'
+        inputs:
+          SourceFolder: 'WalttiProServices/$(ServiceBuildConfiguration)'
+          Contents: '\*.pdb'
+
+      # - task: VSTest@2
+      #   displayName: 'Run unit tests'
+      #   inputs:
+      #     testSelector: 'testAssemblies'
+      #     testAssemblyVer2: |
+      #       **\*test*.dll
+      #       !**\*TestAdapter.dll
+      #       !**\obj\**
+      #     platform: '$(BuildPlatform)'
+      #     configuration: '$(BuildConfiguration)'
+      #     searchFolder: '$(System.DefaultWorkingDirectory)'
+
+      - task: CopyFiles@2
+        displayName: 'Copy Terraform and Ansible script files'
+        inputs:
+          SourceFolder: Terraform
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/Terraform'
+          CleanTargetFolder: true
+
+      - task: CopyFiles@2
+        displayName: 'Copy Database script folders'
+        inputs:
+          SourceFolder: 'Database'
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/Database'
+          OverWrite: true
+
+      - task: CopyFiles@2
+        displayName: 'Copy DLLs from AzureDev folder'
+        inputs:
+          SourceFolder: WalttiProServices/$(BuildConfiguration)
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/Terraform/ansible/files/Services'
+          CleanTargetFolder: true
+      - task: CopyFiles@2
+        displayName: 'Copy Angular Files from dist'
+        inputs:
+          SourceFolder: WalttiProUI/dist/azuredev
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/Terraform/ansible/files/UI'
+          CleanTargetFolder: true
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish build Artifacts'
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: 'drop'
+          publishLocation: 'Container'
+        condition: succeededOrFailed()
+      - task: PowerShell@2
+        displayName: 'Degug parameters'
+        inputs:
+          targetType: Inline
+          script: |
+            Write-Host "Build.ArtifactStagingDirectory" : "$(Build.ArtifactStagingDirectory)"
+            Write-Host "System.DefaultWorkingDirectory" : "$(System.DefaultWorkingDirectory)"
+            Write-Host "System.ArtifactsDirectory" : "$(System.ArtifactsDirectory)"
+            Write-Host "Pipeline.Workspace" : "$(Pipeline.Workspace)"
+            Write-Host "System.ArtifactsDirectory" : "$(System.ArtifactsDirectory)"
+            Write-Host "agent.builddirectory" : "$(agent.builddirectory)"
+
+  - deployment: Dev_Deployment
+    displayName: Deploy Applications
+    dependsOn: Build_Applications
+    pool:
+      name: Azure Pipelines
+      vmImage: 'ubuntu-latest'
+    environment: 'AzureDev'
+    variables:
+    - name: ServiceConnectionName
+      value: 'WalttiProServiceConnection-All'
+    - name: UserName
+      value: 'ojala'
+    - name: 'Password'
+      value: 'FOOfoo#123'
+    strategy:
+      runOnce:
+        deploy:
+            steps:
+              - download: none
+              - task: DownloadBuildArtifacts@0
+                displayName: 'Download build artifacts'
+                inputs:
+                  buildType: 'current'
+                  downloadType: 'single'
+                  artifactName: 'drop'
+                  downloadPath: '$(Build.ArtifactStagingDirectory)'
+
+              - task: DownloadPipelineArtifact@2
+                displayName: 'Download Pipeline artifacts'
+                inputs:
+                  buildType: 'current'
+                  artifactName: 'variables'
+                  targetPath: '$(Pipeline.Workspace)'
+
+              - task: Bash@3
+                displayName: "Read IP_Address"
+                inputs:
+                  targetType: 'inline'
+                  script: |
+                    IP_Address=$(cat $(Pipeline.Workspace)/Da1/variables/local)
+                    echo "##vso[task.setvariable variable=IP_Address]$IP_Address"
+                  workingDirectory: '$(Pipeline.Workspace)'
+
+              - task: Bash@3
+                displayName: "Print IP_Address"
+                inputs:
+                  targetType: 'inline'
+                  script: 'echo "$(IP_Address)"'
+                  workingDirectory: '$(Pipeline.Workspace)'
+              
+              - task: UsePythonVersion@0
+                displayName: 'Install Python'
+                inputs:
+                  versionSpec: '3.6'
+
+              - script: pip3 install ansible[azure]
+                displayName: 'Install Ansible and the Azure modules'
+              
+              - task: Bash@3
+                displayName: "Install pywinrm"
+                inputs:
+                  targetType: 'inline'
+                  script: 'pip3 install --ignore-installed "pywinrm>=0.2.2"'
+              - task: Bash@3
+                displayName: "Install Azure-CLI"
+                inputs:
+                  targetType: 'inline'
+                  script: 'pip3 install azure-cli'
+                
+              - task: AzureCLI@2
+                displayName: 'Set environment variables'
+                inputs:
+                  azureSubscription: 'WalttiProServiceConnection-All'
+                  addSpnToEnvironment: true
+                  scriptType: 'bash'
+                  scriptLocation: 'inlineScript'
+                  inlineScript: |
+                    echo "##vso[task.setvariable variable=ARM_SUBSCRIPTION_ID]$(az account show --query="id" -o tsv)"
+                    echo "##vso[task.setvariable variable=ARM_CLIENT_ID]${servicePrincipalId}"
+                    echo "##vso[task.setvariable variable=ARM_CLIENT_SECRET]${servicePrincipalKey}"
+                    echo "##vso[task.setvariable variable=ARM_TENANT_ID]${tenantId}"
+              
+
+              - script: ansible-playbook -i $(Build.ArtifactStagingDirectory)/drop/Terraform/ansible/inventory.azure_rm.yaml $(Build.ArtifactStagingDirectory)/drop/Terraform/ansible/windows.yaml  --extra-vars "public_ip_address=$(IP_Address) user_name=$(UserName) password=$(Password)"
+                displayName: 'Run Ansible Playbook'
+                env:
+                  AZURE_CLIENT_ID: $(ARM_CLIENT_ID)
+                  AZURE_SECRET: $(ARM_CLIENT_SECRET)
+                  AZURE_TENANT: $(ARM_TENANT_ID)
+                  AZURE_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              
+              
+              # - script: ansible-playbook -i $(Build.ArtifactStagingDirectory)/drop/Terraform/ansible/inventory.azure_rm.yaml $(Build.ArtifactStagingDirectory)/drop/Terraform/ansible/windows.yaml  --extra-vars "public_ip_address=52.174.111.64 user_name=$(UserName) password=$(Password)"
+              #   displayName: 'Run Ansible Playbook'
+              #   env:
+              #     AZURE_CLIENT_ID: $(ARM_CLIENT_ID)
+              #     AZURE_SECRET: $(ARM_CLIENT_SECRET)
+              #     AZURE_TENANT: $(ARM_TENANT_ID)
+              #     AZURE_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+
+  - job: 'Run_UI_Automation'
+    dependsOn: Dev_Deployment
+    displayName: Run UI automation-Robot framework
+    strategy:
+      matrix:
+        Python37:
+          python.version: '3.7'
+      maxParallel: 1
+    variables:
+    - name: ServiceConnectionName
+      value: 'WalttiProServiceConnection-All'
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(python.version)'
+        architecture: 'x64'
+ 
+    - task: PowerShell@2
+      displayName: 'Get chrome version of Hosted Agent'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $ver = ((Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo).ProductVersion
+          echo "##vso[task.setvariable variable=ChromeVersion]$ver"
+         
+    - script: pip install robotframework wxPython robotframework-ride==2.0b1 psutil selenium robotframework-databaselibrary robotframework-selenium2library pyodbc pytz pandas robotframework-pandaslibrary xlrd xlwt robotframework-requests robotframework-jsonlibrary webdrivermanager && webdrivermanager chrome:87.0.4280.88 --linkpath AUTO
+      displayName: 'Install Robot framework dependencies'
+
+    - task: AzurePowerShell@5
+      displayName: 'Add SQL Server firewall rule for Robot framework'
+      inputs:
+          azureSubscription: 'WalttiProServiceConnection-All'
+          ScriptType: 'InlineScript'
+          Inline: |
+            $rule = 'firewall_rule_for_robot'
+            $resourcegroup = 'rg-dev-test-db'
+            $server = 'walttipro'
+            $found_rule = Get-AzSqlServerFirewallRule -FirewallRuleName $rule -ResourceGroupName $resourcegroup -ServerName $server -ErrorAction SilentlyContinue
+            if($found_rule){
+              Remove-AzSqlServerFirewallRule -FirewallRuleName $rule -ResourceGroupName $resourcegroup -ServerName $server
+            } 
+
+            $ip_address = Invoke-RestMethod http://ipinfo.io/json | Select -exp ip
+            New-AzSqlServerFirewallRule -ResourceGroupName $resourcegroup -ServerName $server -FirewallRuleName $rule -StartIpAddress $ip_address -EndIpAddress $ip_address
+          azurePowerShellVersion: 'LatestVersion'
+    
+    - task: PowerShell@2
+      displayName: "Run Robot tests"
+      inputs:
+        targetType: 'inline'
+        script: 'robot --pythonpath . -x outputxunit.xml ''TestAutomation/WPROTestSuite.txt'''
+        errorActionPreference: 'continue'
+      continueOnError: true
+   
+    # - task: PowerShell@2
+    #   displayName: "Run Robot tests"
+    #   inputs:
+    #       targetType: 'inline'
+    #       script: 'robot -x outputxunit.xml -t *TC004_CA* "TestAutomation/WPROTestSuite.txt"'
+    #       errorActionPreference: 'Continue'
+    #   continueOnError: true
+    
+
+    - task: AzurePowerShell@5
+      displayName: 'Remove SQLServer firewall rule added for Robot framework'
+      inputs:
+          azureSubscription: 'WalttiProServiceConnection-All'
+          ScriptType: 'InlineScript'
+          Inline: 'Remove-AzSqlServerFirewallRule -FirewallRuleName "firewall_rule_for_robot" -ResourceGroupName "rg-dev-test-db" -ServerName "walttipro"'
+          azurePowerShellVersion: 'LatestVersion'
+    
+    - task: PublishTestResults@2
+      displayName: 'Publish test result'
+      inputs:
+        testResultsFiles: outputxunit.xml
+        searchFolder: '$(System.DefaultWorkingDirectory)'
+      condition: succeededOrFailed()
+ 
+- stage: Test_deployment
+  displayName: Test Deployment
+  pool:
+    name: Azure Pipelines
+    vmImage: 'vs2017-win2016'
+    workspace:
+        clean: all
+  jobs:
+  
+  # - job: Destroy_Dev_VM
+  #   displayName: Destroy Dev environment
+  #   steps:
+  #     - task: TerraformInstaller@0
+  #       displayName: 'Install Terraform'
+  #       inputs:
+  #         terraformVersion: 'latest'
+      
+  #     - task: Terraform@2
+  #       displayName: 'Terraform init'
+  #       inputs:
+  #         TemplatePath: 'Terraform'
+  #         Arguments: 'init'
+  #         InstallTerraform: false
+  #         UseAzureSub: true
+  #         ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+  #         ConnectedServiceNameARM: 'WalttiProServiceConnection-All'
+  #         ManageState: true
+  #         SpecifyStorageAccount: true
+  #         StorageAccountResourceGroup: 'rg-terraform'
+  #         StorageAccountRM: 'walttiproterraform'
+  #         StorageContainerName: 'terraform'
+
+  #     - task: Terraform@2
+  #       displayName: 'Terraform select workspace'
+  #       inputs:
+  #         TemplatePath: 'Terraform'
+  #         Arguments: 'workspace select dev'
+  #         InstallTerraform: false
+  #         UseAzureSub: true
+  #         ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+  #         ConnectedServiceNameARM: 'WalttiProServiceConnection-All'
+  #         ManageState: true
+  #         SpecifyStorageAccount: true
+  #         StorageAccountResourceGroup: 'rg-terraform'
+  #         StorageAccountRM: 'walttiproterraform'
+  #         StorageContainerName: 'terraform'
+          
+  #     - task: TerraformCLI@0
+  #       displayName: 'Terraform destroy'
+  #       inputs:
+  #         command: 'destroy'
+  #         workingDirectory: 'Terraform'
+  #         environmentServiceName: 'WalttiProServiceConnection-All'
+
+  - job: Provision_Test_VM
+    #dependsOn: Destroy_Dev_VM
+    displayName: Provision Test environment
+    steps:
+      - task: TerraformInstaller@0
+        displayName: 'Install Terraform'
+        inputs:
+          terraformVersion: 'latest'
+
+      - task: Terraform@2
+        displayName: 'Terraform init'
+        inputs:
+          TemplatePath: 'Terraform'
+          Arguments: 'init'
+          InstallTerraform: false
+          UseAzureSub: true
+          ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+          ConnectedServiceNameARM: 'WalttiProServiceConnection-All'
+          ManageState: true
+          SpecifyStorageAccount: true
+          StorageAccountResourceGroup: 'rg-terraform'
+          StorageAccountRM: 'walttiproterraform'
+          StorageContainerName: 'terraform'
+
+      - task: Terraform@2
+        displayName: 'Terraform select workspace'
+        inputs:
+          TemplatePath: 'Terraform'
+          Arguments: 'workspace select test'
+          InstallTerraform: false
+          UseAzureSub: true
+          ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+          ConnectedServiceNameARM: 'WalttiProServiceConnection-All'
+          ManageState: true
+          SpecifyStorageAccount: true
+          StorageAccountResourceGroup: 'rg-terraform'
+          StorageAccountRM: 'walttiproterraform'
+          StorageContainerName: 'terraform'
+
+      - task: Terraform@2
+        displayName: 'Terraform validate'
+        inputs:
+          TemplatePath: 'Terraform'
+          Arguments: 'validate'
+          InstallTerraform: false
+          UseAzureSub: false
+      - task: Terraform@2
+        displayName: 'Terraform plan'
+        inputs:
+          TemplatePath: 'Terraform'
+          Arguments: 'plan'
+          InstallTerraform: false
+          UseAzureSub: true
+          ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+          ConnectedServiceNameARM: 'WalttiProServiceConnection-All'
+          ManageState: true
+          SpecifyStorageAccount: true
+          StorageAccountResourceGroup: 'rg-terraform'
+          StorageAccountRM: 'walttiproterraform'
+          StorageContainerName: 'terraform'
+
+      - task: TerraformCLI@0
+        displayName: 'Terraform apply'
+        inputs:
+          command: 'apply'
+          workingDirectory: 'Terraform'
+          environmentServiceName: 'WalttiProServiceConnection-All'
+      - task: terraform-outputs@0
+        displayName: 'Terraform output'
+        inputs:
+          workingDirectory: 'Terraform'
+          mapSensitiveOutputsAsSecrets: false
+
+      - task: PowerShell@2
+        displayName: 'Output IP Address'
+        inputs:
+          targetType: Inline
+          script: |
+            Write-Host "$(public_ip_address)"
+
+      - task: Bash@3
+        displayName: 'Create variable for IP Address'
+        inputs:
+          targetType: 'inline'
+          script: |
+            IP_Address="$(public_ip_address)"
+            echo "$IP_Address"
+            mkdir -p $(Pipeline.Workspace)/variables_test
+            echo "$IP_Address" > $(Pipeline.Workspace)/variables_test/local
+          workingDirectory: '$(Pipeline.Workspace)'
+ 
+      - task: AzureCLI@2
+        displayName: 'Set SQL Server Firewall Rule'
+        inputs:
+          azureSubscription: 'WalttiProServiceConnection-All'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: 'az sql server firewall-rule create -g rg-dev-test-db -s walttipro -n env_test_firewall_rule --start-ip-address "$(public_ip_address)" --end-ip-address "$(public_ip_address)"'
+     
+      - task: BatchScript@1
+        displayName: 'Deploy database artifacts'
+        inputs:
+          filename: 'Database/Deployment/AZURE-TEST.DBDeployment.bat'
+          workingFolder: Database/Deployment'
+
+      - task: PublishPipelineArtifact@1
+        displayName: 'Publish pipeline artifacts'
+        inputs:
+          targetPath: '$(Pipeline.Workspace)'
+          artifact: 'variables_test'
+          publishLocation: 'pipeline'
+    
+  - job: Build_Applications_For_Test
+    dependsOn: Provision_Test_VM
+    displayName: Build Applications
+    
+    variables:
+    - name: Parameters.solution
+      value: '**/*.sln'
+    - name: BuildPlatform
+      value: 'Any CPU'
+    - name: BuildConfiguration
+      value: 'AzureTest'
+    - name: ArtifactName
+      value: 'drop'
+    steps:
+      - task: NodeTool@0
+        inputs:
+          versionSpec: '12.x'
+        displayName: 'Install Node.js'
+        
+      - task: Npm@1
+        displayName: 'Angular CLI installation '
+        inputs:
+          command: custom
+          workingDir: WalttiProUI
+          verbose: false
+          customCommand: 'install @angular/cli -g'
+      
+      - task: Cache@2
+        displayName: 'Cache npm packages'
+        inputs:
+          key: '**/package-lock.json, !**/node_modules/**/package-lock.json, !**/.*/**/package-lock.json'
+          path: 'WalttiProUI/node_modules'
+          cacheHitVar: 'CacheRestored'
+
+      - task: Npm@1
+        displayName: 'npm install'
+        inputs:
+          workingDir: WalttiProUI
+          verbose: false
+        condition: eq(variables['CacheRestored'],False)
+      
+      - task: Npm@1
+        displayName: 'Build UI application'
+        inputs:
+          command: custom
+          workingDir: WalttiProUI
+          verbose: false
+          customCommand: 'run build:AzureTest'
+
+      - task: MSBuild@1
+        displayName: 'Build Services'
+        inputs:
+          solution: 'WalttiProServices/WalttiProServices.sln'
+          configuration: 'AzureTest'
+          clean: true
+          restoreNugetPackages: true
+          logProjectEvents: true
+      
+      - task: DeleteFiles@1
+        displayName: 'Delete pdb files'
+        inputs:
+          SourceFolder: 'WalttiProServices'
+          Contents: '\*.pdb'
+
+      - task: VSTest@2
+        displayName: 'Run unit tests'
+        inputs:
+          testSelector: 'testAssemblies'
+          testAssemblyVer2: |
+            **\*test*.dll
+            !**\*TestAdapter.dll
+            !**\obj\**
+          platform: '$(BuildPlatform)'
+          configuration: '$(BuildConfiguration)'
+          searchFolder: '$(System.DefaultWorkingDirectory)'
+
+      - task: CopyFiles@2
+        displayName: 'Copy Terraform and Ansible script files'
+        inputs:
+          SourceFolder: Terraform
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/Terraform'
+          CleanTargetFolder: true
+
+      - task: CopyFiles@2
+        displayName: 'Copy Database script folders'
+        inputs:
+          SourceFolder: 'Database'
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/Database'
+          OverWrite: true
+
+      - task: CopyFiles@2
+        displayName: 'Copy DLLs from AzureTest folder'
+        inputs:
+          SourceFolder: WalttiProServices/AzureTest
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/Terraform/ansible/files/Services'
+          CleanTargetFolder: true
+      - task: CopyFiles@2
+        displayName: 'Copy Angular Files from dist'
+        inputs:
+          SourceFolder: WalttiProUI/dist/azuretest
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/Terraform/ansible/files/UI'
+          CleanTargetFolder: true
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish build Artifacts'
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: 'drop'
+          publishLocation: 'Container'
+        condition: succeededOrFailed()
+     
+  - deployment: Test_Deployment
+    dependsOn: Build_Applications_For_Test
+    displayName: Deploy to Test
+    pool:
+      name: Azure Pipelines
+      vmImage: 'ubuntu-latest'
+    environment: 'AzureTest'
+    variables:
+    - name: BuildConfiguration
+      value: 'AzureTest'
+    - name: ArtifactName
+      value: 'drop'
+    - name: UserName
+      value: 'ojala'
+    - name: 'Password'
+      value: 'FOOfoo#123'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - download: none
+            - task: DownloadBuildArtifacts@0
+              displayName: 'Download build artifacts'
+              inputs:
+                buildType: 'current'
+                downloadType: 'single'
+                artifactName: 'drop'
+                downloadPath: '$(Build.ArtifactStagingDirectory)'
+
+            - task: DownloadPipelineArtifact@2
+              displayName: 'Download Pipeline artifacts'
+              inputs:
+                buildType: 'current'
+                artifactName: 'variables_test'
+                targetPath: '$(Pipeline.Workspace)'
+
+            - task: Bash@3
+              displayName: "Read IP_Address"
+              inputs:
+                targetType: 'inline'
+                script: |
+                  IP_Address=$(cat $(Pipeline.Workspace)/Da1/variables_test/local)
+                  echo "##vso[task.setvariable variable=IP_Address]$IP_Address"
+                workingDirectory: '$(Pipeline.Workspace)'
+
+            - task: Bash@3
+              displayName: "Print IP_Address"
+              inputs:
+                targetType: 'inline'
+                script: 'echo "$(IP_Address)"'
+                workingDirectory: '$(Pipeline.Workspace)'
+            
+              
+            - task: UsePythonVersion@0
+              displayName: 'Install Python'
+              inputs:
+                  versionSpec: '3.6'
+
+            - script: pip3 install ansible[azure]
+              displayName: 'Install Ansible and the Azure modules'
+              
+            - task: Bash@3
+              displayName: "Install pywinrm"
+              inputs:
+                  targetType: 'inline'
+                  script: 'pip3 install --ignore-installed "pywinrm>=0.2.2"'
+            
+            - task: Bash@3
+              displayName: "Install Azure-CLI"
+              inputs:
+                  targetType: 'inline'
+                  script: 'pip3 install azure-cli'
+                
+            - task: AzureCLI@2
+              displayName: 'Set environment variables'
+              inputs:
+                  azureSubscription: 'WalttiProServiceConnection-All'
+                  addSpnToEnvironment: true
+                  scriptType: 'bash'
+                  scriptLocation: 'inlineScript'
+                  inlineScript: |
+                    echo "##vso[task.setvariable variable=ARM_SUBSCRIPTION_ID]$(az account show --query="id" -o tsv)"
+                    echo "##vso[task.setvariable variable=ARM_CLIENT_ID]${servicePrincipalId}"
+                    echo "##vso[task.setvariable variable=ARM_CLIENT_SECRET]${servicePrincipalKey}"
+                    echo "##vso[task.setvariable variable=ARM_TENANT_ID]${tenantId}"
+              
+            - script: ansible-playbook -i $(Build.ArtifactStagingDirectory)/drop/Terraform/ansible/test_inventory.azure_rm.yaml $(Build.ArtifactStagingDirectory)/drop/Terraform/ansible/windows.yaml  --extra-vars "public_ip_address=$(IP_Address) user_name=$(UserName) password=$(Password)"
+              displayName: 'Run Ansible Playbook'
+              env:
+                  AZURE_CLIENT_ID: $(ARM_CLIENT_ID)
+                  AZURE_SECRET: $(ARM_CLIENT_SECRET)
+                  AZURE_TENANT: $(ARM_TENANT_ID)
+                  AZURE_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+  
+
+- stage: UAT_deployment
+  displayName: UAT Deployment
+  jobs:
+
+  - job: Build_Applications
+    displayName: Build Applications
+    
+    variables:
+    - name: Parameters.solution
+      value: '**/*.sln'
+    - name: BuildPlatform
+      value: 'Any CPU'
+    - name: BuildConfiguration
+      value: 'CAT'
+    - name: ArtifactName
+      value: 'drop'
+    steps:
+      
+      - task: NodeTool@0
+        inputs:
+          versionSpec: '12.x'
+        displayName: 'Install Node.js'
+      - task: Npm@1
+        displayName: 'npm install'
+        inputs:
+          workingDir: WalttiProUI
+          verbose: false
+      - task: Npm@1
+        displayName: 'Angular CLI installation '
+        inputs:
+          command: custom
+          workingDir: WalttiProUI
+          verbose: false
+          customCommand: 'install @angular/cli -g'
+      - task: Npm@1
+        displayName: 'Build UI application'
+        inputs:
+          command: custom
+          workingDir: WalttiProUI
+          verbose: false
+          customCommand: 'run build:cat'
+
+      - task: NuGetCommand@2
+        displayName: 'Restore Nuget packages'
+        inputs:
+          command: 'restore'
+          restoreSolution: 'WalttiProServices/WalttiProServices.sln'
+          feedsToUse: 'select'
+      - task: MSBuild@1
+        displayName: 'Build Services'
+        inputs:
+          solution: 'WalttiProServices/WalttiProServices.sln'
+          configuration: 'CAT'
+          clean: true
+          restoreNugetPackages: true
+          logProjectEvents: true
+      - task: DeleteFiles@1
+        displayName: 'Delete pdb files'
+        inputs:
+          SourceFolder: 'WalttiProServices'
+          Contents: '\*.pdb'
+      - task: CopyFiles@2
+        displayName: 'Copy WalttoPro database scripts folders'
+        inputs:
+          SourceFolder: 'Database'
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/$(BuildConfiguration)/Database'
+          OverWrite: true
+      
+      - task: CopyFiles@2
+        displayName: 'Copy DLLs from Out folder'
+        inputs:
+          SourceFolder: WalttiProServices/$(BuildConfiguration)
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/$(BuildConfiguration)/Service'
+          CleanTargetFolder: true
+
+      - task: CopyFiles@2
+        displayName: 'Copy Angular Files from dist'
+        inputs:
+          SourceFolder: WalttiProUI/dist/cat
+          Contents: '**'
+          TargetFolder: '$(build.artifactstagingdirectory)/$(BuildConfiguration)/UI'
+          CleanTargetFolder: true
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish build Artifacts'
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: '$(ArtifactName)'
+          publishLocation: 'Container'
+        condition: succeededOrFailed()
+     
+  - deployment: VMDeploy
+    displayName: Deploy to UAT
+    dependsOn: Build_Applications
+    environment:
+      name: UAT
+      resourceType: VirtualMachine
+    variables:
+    - name: BuildConfiguration
+      value: 'CAT'
+    - name: ArtifactName
+      value: 'drop'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: StopWindowsService@1
+            displayName: 'Stop WalttiPro service'
+            inputs:
+              serviceName: 'WalttiPro'
+          - task: StopWindowsService@1
+            displayName: 'Stop WalttiPro Support Service'
+            inputs:
+              serviceName: 'WalttiProSupportService'
+
+          - task: CopyFiles@2
+            displayName: 'Copy UI Folder'
+            inputs:
+              SourceFolder: 'C:\azagent\A1\_work\1\drop\$(BuildConfiguration)\UI'
+              Contents: '**'
+              TargetFolder: 'D:\WalttiPro\web'
+              OverWrite: true
+          
+          - task: IISWebAppManagementOnMachineGroup@0
+            displayName: 'Create/Modify WalttiPro Website'
+            inputs:
+              IISDeploymentType: 'IISWebApplication'
+              ParentWebsiteNameForApplication: 'Default Web Site'
+              VirtualPathForApplication: '/WalttiPro'
+              PhysicalPathForApplication: 'D:\WalttiPro\web'
+              
+          - task: IISWebAppDeploymentOnMachineGroup@0
+            displayName: 'Deploy WalltiPro UI in IIS'
+            inputs:
+              WebSiteName: 'Default Web Site'
+              VirtualApplication: 'WalttiPro'
+              Package: 'D:\WalttiPro\web'
+          
+          - task: CopyFiles@2
+            displayName: 'Copy Database Folder'
+            inputs:
+              SourceFolder: 'C:\azagent\A1\_work\1\drop\$(BuildConfiguration)\Database'
+              Contents: '**'
+              TargetFolder: 'D:\WalttiPro\Database'
+              OverWrite: true
+
+          - task: BatchScript@1
+            displayName: 'Deploy database artifacts'
+            inputs:
+              filename: 'D:\WalttiPro\Database\Deployment\Contrasec.DBDeployment.bat'
+          
+          - task: CopyFiles@2
+            displayName: 'Copy Service Folder'
+            inputs:
+              SourceFolder: 'C:\azagent\A1\_work\1\drop\$(BuildConfiguration)\Service'
+              Contents: '**'
+              TargetFolder: 'D:\WalttiPro\service'
+              OverWrite: true
+              
+          - task: StartWindowsService@1
+            displayName: 'Start WalttiPro service'
+            inputs:
+              serviceName: 'WalttiPro'
+
+          - task: StartWindowsService@1
+            displayName: 'Start WalttiPro Support Service'
+            inputs:
+              serviceName: 'WalttiProSupportService'
