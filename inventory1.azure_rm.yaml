@@ -1,0 +1,7 @@
+plugin: azure_rm
+include_vm_resource_groups:
+  - rg-dev
+auth_source: env
+keyed_groups:
+  - key: tags.ansible_group | default('none')
+    separator: ""
